@@ -7,6 +7,7 @@ import 'dart:async';
 import 'package:meta/meta.dart';
 
 import '../application_package.dart';
+import '../artifacts.dart';
 import '../base/common.dart';
 import '../base/context.dart';
 import '../base/file_system.dart';
@@ -23,61 +24,12 @@ import '../globals.dart';
 import '../macos/cocoapod_utils.dart';
 import '../macos/xcode.dart';
 import '../project.dart';
+import '../reporting/usage.dart';
 import '../services.dart';
-import '../usage.dart';
 import 'code_signing.dart';
 import 'xcodeproj.dart';
 
 IMobileDevice get iMobileDevice => context.get<IMobileDevice>();
-PlistBuddy get plistBuddy => context.get<PlistBuddy>();
-
-class PlistBuddy {
-  const PlistBuddy();
-
-  static const String path = '/usr/libexec/PlistBuddy';
-
-  Future<ProcessResult> run(List<String> args) => processManager.run(<String>[path]..addAll(args));
-}
-
-/// A property list is a key-value representation commonly used for
-/// configuration on macOS/iOS systems.
-class PropertyList {
-  const PropertyList(this.plistPath);
-
-  final String plistPath;
-
-  /// Prints the specified key, or returns null if not present.
-  Future<String> read(String key) async {
-    final ProcessResult result = await _runCommand('Print $key');
-    if (result.exitCode == 0)
-      return result.stdout.trim();
-    return null;
-  }
-
-  /// Adds [key]. Has no effect if the key already exists.
-  Future<void> addString(String key, String value) async {
-    await _runCommand('Add $key string $value');
-  }
-
-  /// Updates [key] with the new [value]. Has no effect if the key does not exist.
-  Future<void> update(String key, String value) async {
-    await _runCommand('Set $key $value');
-  }
-
-  /// Deletes [key].
-  Future<void> delete(String key) async {
-    await _runCommand('Delete $key');
-  }
-
-  /// Deletes the content of the property list and creates a new root of the specified type.
-  Future<void> clearToDict() async {
-    await _runCommand('Clear dict');
-  }
-
-  Future<ProcessResult> _runCommand(String command) async {
-    return await plistBuddy.run(<String>['-c', command, plistPath]);
-  }
-}
 
 /// Specialized exception for expected situations where the ideviceinfo
 /// tool responds with exit code 255 / 'No device found' message
@@ -91,35 +43,99 @@ class IOSDeviceNotFoundError implements Exception {
 }
 
 class IMobileDevice {
-  const IMobileDevice();
+  IMobileDevice()
+      : _ideviceIdPath = artifacts.getArtifactPath(Artifact.ideviceId, platform: TargetPlatform.ios)
+          ?? 'idevice_id', // TODO(fujino): remove fallback once g3 updated
+        _ideviceinfoPath = artifacts.getArtifactPath(Artifact.ideviceinfo, platform: TargetPlatform.ios)
+          ?? 'ideviceinfo', // TODO(fujino): remove fallback once g3 updated
+        _idevicenamePath = artifacts.getArtifactPath(Artifact.idevicename, platform: TargetPlatform.ios)
+          ?? 'idevicename', // TODO(fujino): remove fallback once g3 updated
+        _idevicesyslogPath = artifacts.getArtifactPath(Artifact.idevicesyslog, platform: TargetPlatform.ios)
+          ?? 'idevicesyslog', // TODO(fujino): remove fallback once g3 updated
+        _idevicescreenshotPath = artifacts.getArtifactPath(Artifact.idevicescreenshot, platform: TargetPlatform.ios)
+          ?? 'idevicescreenshot' { // TODO(fujino): remove fallback once g3 updated
+        }
+  final String _ideviceIdPath;
+  final String _ideviceinfoPath;
+  final String _idevicenamePath;
+  final String _idevicesyslogPath;
+  final String _idevicescreenshotPath;
 
-  bool get isInstalled => exitsHappy(<String>['idevice_id', '-h']);
+  bool get isInstalled {
+    _isInstalled ??= exitsHappy(
+      <String>[
+        _ideviceIdPath,
+        '-h'
+      ],
+      environment: Map<String, String>.fromEntries(
+        <MapEntry<String, String>>[cache.dyLdLibEntry]
+      ),
+    );
+    return _isInstalled;
+  }
+  bool _isInstalled;
 
   /// Returns true if libimobiledevice is installed and working as expected.
   ///
   /// Older releases of libimobiledevice fail to work with iOS 10.3 and above.
   Future<bool> get isWorking async {
-    if (!isInstalled)
-      return false;
+    if (_isWorking != null) {
+      return _isWorking;
+    }
+    if (!isInstalled) {
+      _isWorking = false;
+      return _isWorking;
+    }
     // If usage info is printed in a hyphenated id, we need to update.
     const String fakeIphoneId = '00008020-001C2D903C42002E';
-    final ProcessResult ideviceResult = (await runAsync(<String>['ideviceinfo', '-u', fakeIphoneId])).processResult;
+    final Map<String, String> executionEnv = Map<String, String>.fromEntries(
+      <MapEntry<String, String>>[cache.dyLdLibEntry]
+    );
+    final ProcessResult ideviceResult = (await runAsync(
+      <String>[
+        _ideviceinfoPath,
+        '-u',
+        fakeIphoneId
+      ],
+      environment: executionEnv,
+    )).processResult;
     if (ideviceResult.stdout.contains('Usage: ideviceinfo')) {
-      return false;
+      _isWorking = false;
+      return _isWorking;
     }
 
     // If no device is attached, we're unable to detect any problems. Assume all is well.
-    final ProcessResult result = (await runAsync(<String>['idevice_id', '-l'])).processResult;
-    if (result.exitCode == 0 && result.stdout.isEmpty)
-      return true;
-
-    // Check that we can look up the names of any attached devices.
-    return await exitsHappyAsync(<String>['idevicename']);
+    final ProcessResult result = (await runAsync(
+      <String>[
+        _ideviceIdPath,
+        '-l',
+      ],
+      environment: executionEnv,
+    )).processResult;
+    if (result.exitCode == 0 && result.stdout.isEmpty) {
+      _isWorking = true;
+    } else {
+      // Check that we can look up the names of any attached devices.
+      _isWorking = await exitsHappyAsync(
+        <String>[_idevicenamePath],
+        environment: executionEnv,
+      );
+    }
+    return _isWorking;
   }
+  bool _isWorking;
 
   Future<String> getAvailableDeviceIDs() async {
     try {
-      final ProcessResult result = await processManager.run(<String>['idevice_id', '-l']);
+      final ProcessResult result = await processManager.run(
+        <String>[
+          _ideviceIdPath,
+          '-l'
+        ],
+        environment: Map<String, String>.fromEntries(
+          <MapEntry<String, String>>[cache.dyLdLibEntry]
+        ),
+      );
       if (result.exitCode != 0)
         throw ToolExit('idevice_id returned an error:\n${result.stderr}');
       return result.stdout;
@@ -130,7 +146,18 @@ class IMobileDevice {
 
   Future<String> getInfoForDevice(String deviceID, String key) async {
     try {
-      final ProcessResult result = await processManager.run(<String>['ideviceinfo', '-u', deviceID, '-k', key]);
+      final ProcessResult result = await processManager.run(
+        <String>[
+          _ideviceinfoPath,
+          '-u',
+          deviceID,
+          '-k',
+          key
+        ],
+        environment: Map<String, String>.fromEntries(
+          <MapEntry<String, String>>[cache.dyLdLibEntry]
+        ),
+      );
       if (result.exitCode == 255 && result.stdout != null && result.stdout.contains('No device found'))
         throw IOSDeviceNotFoundError('ideviceinfo could not find device:\n${result.stdout}');
       if (result.exitCode != 0)
@@ -142,52 +169,30 @@ class IMobileDevice {
   }
 
   /// Starts `idevicesyslog` and returns the running process.
-  Future<Process> startLogger(String deviceID) => runCommand(<String>['idevicesyslog', '-u', deviceID]);
+  Future<Process> startLogger(String deviceID) {
+    return runCommand(
+      <String>[
+        _idevicesyslogPath,
+        '-u',
+        deviceID,
+      ],
+      environment: Map<String, String>.fromEntries(
+        <MapEntry<String, String>>[cache.dyLdLibEntry]
+      ),
+    );
+  }
 
   /// Captures a screenshot to the specified outputFile.
   Future<void> takeScreenshot(File outputFile) {
-    return runCheckedAsync(<String>['idevicescreenshot', outputFile.path]);
-  }
-}
-
-/// Sets the Xcode system.
-///
-/// Xcode 10 added a new (default) build system with better performance and
-/// stricter checks. Flutter apps without plugins build fine under the new
-/// system, but it causes build breakages in projects with CocoaPods enabled.
-/// This affects Flutter apps with plugins.
-///
-/// Once Flutter has been updated to be fully compliant with the new build
-/// system, this can be removed.
-//
-// TODO(cbracken): remove when https://github.com/flutter/flutter/issues/20685 is fixed.
-Future<void> setXcodeWorkspaceBuildSystem({
-  @required Directory workspaceDirectory,
-  @required File workspaceSettings,
-  @required bool modern,
-}) async {
-  // If this isn't a workspace, we're not using CocoaPods and can use the new
-  // build system.
-  if (!workspaceDirectory.existsSync())
-    return;
-
-  final PropertyList plist = PropertyList(workspaceSettings.path);
-  if (!workspaceSettings.existsSync()) {
-    workspaceSettings.parent.createSync(recursive: true);
-    await plist.clearToDict();
-  }
-
-  const String kBuildSystemType = 'BuildSystemType';
-  if (modern) {
-    printTrace('Using new Xcode build system.');
-    await plist.delete(kBuildSystemType);
-  } else {
-    printTrace('Using legacy Xcode build system.');
-    if (await plist.read(kBuildSystemType) == null) {
-      await plist.addString(kBuildSystemType, 'Original');
-    } else {
-      await plist.update(kBuildSystemType, 'Original');
-    }
+    return runCheckedAsync(
+      <String>[
+        _idevicescreenshotPath,
+        outputFile.path
+      ],
+      environment: Map<String, String>.fromEntries(
+        <MapEntry<String, String>>[cache.dyLdLibEntry]
+      ),
+    );
   }
 }
 
@@ -206,12 +211,6 @@ Future<XcodeBuildResult> buildXcodeProject({
   if (!_checkXcodeVersion())
     return XcodeBuildResult(success: false);
 
-  // TODO(cbracken): remove when https://github.com/flutter/flutter/issues/20685 is fixed.
-  await setXcodeWorkspaceBuildSystem(
-    workspaceDirectory: app.project.xcodeWorkspace,
-    workspaceSettings: app.project.xcodeWorkspaceSharedSettings,
-    modern: false,
-  );
 
   final XcodeProjectInfo projectInfo = await xcodeProjectInterpreter.getInfo(app.project.hostAppRoot.path);
   if (!projectInfo.targets.contains('Runner')) {
@@ -375,6 +374,10 @@ Future<XcodeBuildResult> buildXcodeProject({
     buildCommands.add('SCRIPT_OUTPUT_STREAM_FILE=${scriptOutputPipeFile.absolute.path}');
   }
 
+  // Don't log analytics for downstream Flutter commands.
+  // e.g. `flutter build bundle`.
+  buildCommands.add('FLUTTER_SUPPRESS_ANALYTICS=true');
+
   final Stopwatch sw = Stopwatch()..start();
   initialBuildStatus = logger.startProgress('Running Xcode build...', timeout: timeoutConfiguration.fastOperation);
   final RunResult buildResult = await runAsync(
@@ -466,6 +469,18 @@ String readGeneratedXcconfig(String appPath) {
 }
 
 Future<void> diagnoseXcodeBuildFailure(XcodeBuildResult result) async {
+  if (result.xcodeBuildExecution != null &&
+      result.xcodeBuildExecution.buildForPhysicalDevice &&
+      result.stdout?.toUpperCase()?.contains('BITCODE') == true) {
+    flutterUsage.sendEvent(
+      'Xcode',
+      'bitcode-failure',
+      parameters: <String, String>{
+        'build-commands': result.xcodeBuildExecution.buildCommands.toString(),
+        'build-settings': result.xcodeBuildExecution.buildSettings.toString(),
+      });
+  }
+
   if (result.xcodeBuildExecution != null &&
       result.xcodeBuildExecution.buildForPhysicalDevice &&
       result.stdout?.contains('BCEROR') == true &&

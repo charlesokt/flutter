@@ -148,7 +148,7 @@ Future<int> runCommandAndStreamOutput(
   final StreamSubscription<String> stdoutSubscription = process.stdout
     .transform<String>(utf8.decoder)
     .transform<String>(const LineSplitter())
-    .where((String line) => filter == null ? true : filter.hasMatch(line))
+    .where((String line) => filter == null || filter.hasMatch(line))
     .listen((String line) {
       if (mapFunction != null)
         line = mapFunction(line);
@@ -163,7 +163,7 @@ Future<int> runCommandAndStreamOutput(
   final StreamSubscription<String> stderrSubscription = process.stderr
     .transform<String>(utf8.decoder)
     .transform<String>(const LineSplitter())
-    .where((String line) => filter == null ? true : filter.hasMatch(line))
+    .where((String line) => filter == null || filter.hasMatch(line))
     .listen((String line) {
       if (mapFunction != null)
         line = mapFunction(line);
@@ -263,20 +263,26 @@ Future<RunResult> runCheckedAsync(
   return result;
 }
 
-bool exitsHappy(List<String> cli) {
+bool exitsHappy(
+  List<String> cli, {
+  Map<String, String> environment,
+}) {
   _traceCommand(cli);
   try {
-    return processManager.runSync(cli).exitCode == 0;
+    return processManager.runSync(cli, environment: environment).exitCode == 0;
   } catch (error) {
     printTrace('$cli failed with $error');
     return false;
   }
 }
 
-Future<bool> exitsHappyAsync(List<String> cli) async {
+Future<bool> exitsHappyAsync(
+  List<String> cli, {
+  Map<String, String> environment,
+}) async {
   _traceCommand(cli);
   try {
-    return (await processManager.run(cli)).exitCode == 0;
+    return (await processManager.run(cli, environment: environment)).exitCode == 0;
   } catch (error) {
     printTrace('$cli failed with $error');
     return false;

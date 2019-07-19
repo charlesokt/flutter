@@ -9,18 +9,41 @@ import 'package:yaml/yaml.dart';
 
 import 'android/gradle.dart' as gradle;
 import 'base/common.dart';
+import 'base/context.dart';
 import 'base/file_system.dart';
 import 'build_info.dart';
 import 'bundle.dart' as bundle;
 import 'cache.dart';
 import 'desktop.dart';
 import 'flutter_manifest.dart';
+import 'globals.dart';
 import 'ios/ios_workflow.dart';
 import 'ios/plist_utils.dart' as plist;
 import 'ios/xcodeproj.dart' as xcode;
 import 'plugins.dart';
 import 'template.dart';
 import 'web/workflow.dart';
+
+FlutterProjectFactory get projectFactory => context.get<FlutterProjectFactory>() ?? const FlutterProjectFactory();
+
+class FlutterProjectFactory {
+  const FlutterProjectFactory();
+
+  /// Returns a [FlutterProject] view of the given directory or a ToolExit error,
+  /// if `pubspec.yaml` or `example/pubspec.yaml` is invalid.
+  FlutterProject fromDirectory(Directory directory) {
+    assert(directory != null);
+    final FlutterManifest manifest = FlutterProject._readManifest(
+      directory.childFile(bundle.defaultManifestPath).path,
+    );
+    final FlutterManifest exampleManifest = FlutterProject._readManifest(
+      FlutterProject._exampleDirectory(directory)
+          .childFile(bundle.defaultManifestPath)
+          .path,
+    );
+    return FlutterProject(directory, manifest, exampleManifest);
+  }
+}
 
 /// Represents the contents of a Flutter project at the specified [directory].
 ///
@@ -38,25 +61,16 @@ class FlutterProject {
       assert(manifest != null),
       assert(_exampleManifest != null);
 
-  /// Returns a future that completes with a [FlutterProject] view of the given directory
-  /// or a ToolExit error, if `pubspec.yaml` or `example/pubspec.yaml` is invalid.
-  static FlutterProject fromDirectory(Directory directory) {
-    assert(directory != null);
-    final FlutterManifest manifest = _readManifest(
-      directory.childFile(bundle.defaultManifestPath).path,
-    );
-    final FlutterManifest exampleManifest = _readManifest(
-      _exampleDirectory(directory).childFile(bundle.defaultManifestPath).path,
-    );
-    return FlutterProject(directory, manifest, exampleManifest);
-  }
+  /// Returns a [FlutterProject] view of the given directory or a ToolExit error,
+  /// if `pubspec.yaml` or `example/pubspec.yaml` is invalid.
+  static FlutterProject fromDirectory(Directory directory) => projectFactory.fromDirectory(directory);
 
-  /// Returns a future that completes with a [FlutterProject] view of the current directory.
-  /// or a ToolExit error, if `pubspec.yaml` or `example/pubspec.yaml` is invalid.
+  /// Returns a [FlutterProject] view of the current directory or a ToolExit error,
+  /// if `pubspec.yaml` or `example/pubspec.yaml` is invalid.
   static FlutterProject current() => fromDirectory(fs.currentDirectory);
 
-  /// Returns a future that completes with a [FlutterProject] view of the given directory.
-  /// or a ToolExit error, if `pubspec.yaml` or `example/pubspec.yaml` is invalid.
+  /// Returns a [FlutterProject] view of the given directory or a ToolExit error,
+  /// if `pubspec.yaml` or `example/pubspec.yaml` is invalid.
   static FlutterProject fromPath(String path) => fromDirectory(fs.directory(path));
 
   /// The location of this project.
@@ -164,9 +178,16 @@ class FlutterProject {
   /// Completes with an empty [FlutterManifest], if the file does not exist.
   /// Completes with a ToolExit on validation error.
   static FlutterManifest _readManifest(String path) {
-    final FlutterManifest manifest = FlutterManifest.createFromPath(path);
-    if (manifest == null)
+    FlutterManifest manifest;
+    try {
+      manifest = FlutterManifest.createFromPath(path);
+    } on YamlException catch (e) {
+      printStatus('Error detected in pubspec.yaml:', emphasis: true);
+      printError('$e');
+    }
+    if (manifest == null) {
       throwToolExit('Please correct the pubspec.yaml file at $path');
+    }
     return manifest;
   }
 
@@ -580,11 +601,14 @@ class WebProject {
 
   /// Whether this flutter project has a web sub-project.
   bool existsSync() {
-    return parent.directory.childDirectory('web').existsSync();
+    return parent.directory.childDirectory('web').existsSync()
+      && indexFile.existsSync();
   }
 
   /// The html file used to host the flutter web application.
-  File get indexFile => parent.directory.childDirectory('web').childFile('index.html');
+  File get indexFile => parent.directory
+      .childDirectory('web')
+      .childFile('index.html');
 
   Future<void> ensureReadyForPlatformSpecificTooling() async {}
 }
